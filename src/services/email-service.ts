@@ -99,7 +99,7 @@ export function createEmailService(env: Env, resendClient?: Resend): EmailServic
           : params.toEmail;
 
       const { error } = await resend.emails.send({
-        from: `${env.SERVICE_EMAIL_NAME} <${env.SERVICE_EMAIL_ADDRESS}>`,
+        from: `${env.SERVICE_EMAIL_NAME} <${env.SERVICE_FROM_EMAIL}>`,
         to: [to],
         subject,
         text,

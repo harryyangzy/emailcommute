@@ -16,6 +16,7 @@ const testEnv: Env = {
   RESEND_API_KEY: 're_test_key',
   RESEND_WEBHOOK_SECRET: WEBHOOK_SECRET,
   SERVICE_EMAIL_ADDRESS: 'commute@example.com',
+  SERVICE_FROM_EMAIL: 'commute@example.com',
   SERVICE_EMAIL_NAME: 'Commute Mail',
 };
 

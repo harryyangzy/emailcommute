@@ -17,10 +17,19 @@ const envSchema = z.object({
     .string()
     .email('SERVICE_EMAIL_ADDRESS must be a valid email address')
     .transform((value) => value.toLowerCase()),
+  // Optional outbound From address. Defaults to SERVICE_EMAIL_ADDRESS.
+  // Use this when the receiving domain cannot send (e.g. *.resend.app).
+  SERVICE_FROM_EMAIL: z
+    .string()
+    .email('SERVICE_FROM_EMAIL must be a valid email address')
+    .optional()
+    .transform((value) => value?.toLowerCase()),
   SERVICE_EMAIL_NAME: z.string().min(1).default('Commute Mail'),
 });
 
-export type Env = z.infer<typeof envSchema>;
+export type Env = Omit<z.infer<typeof envSchema>, 'SERVICE_FROM_EMAIL'> & {
+  SERVICE_FROM_EMAIL: string;
+};
 
 export function loadEnv(source: NodeJS.ProcessEnv = process.env): Env {
   const parsed = envSchema.safeParse(source);
@@ -32,5 +41,9 @@ export function loadEnv(source: NodeJS.ProcessEnv = process.env): Env {
     throw new Error(`Invalid environment configuration:\n${details}`);
   }
 
-  return parsed.data;
+  return {
+    ...parsed.data,
+    SERVICE_FROM_EMAIL:
+      parsed.data.SERVICE_FROM_EMAIL ?? parsed.data.SERVICE_EMAIL_ADDRESS,
+  };
 }
