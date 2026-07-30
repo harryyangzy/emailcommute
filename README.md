@@ -4,6 +4,8 @@ Minimal Node.js + TypeScript service that receives an inbound email via a Resend
 
 **This version only confirms that an email was received. It does not look up transit schedules, connect to Metrolinx, or parse commute requests.**
 
+Status: end-to-end local test succeeded — inbound email via Resend webhook → confirmation reply out. Omg it worked.
+
 ## Features
 
 - `POST /api/webhooks/inbound-email` — Resend inbound webhook
