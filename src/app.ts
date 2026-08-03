@@ -11,6 +11,10 @@ import {
   type InboundEmailRouteDeps,
 } from './routes/inbound-email.js';
 import { createEmailService, type EmailService } from './services/email-service.js';
+import {
+  createMetrolinxService,
+  type MetrolinxService,
+} from './services/metrolinx-service.js';
 
 const MAX_JSON_BODY_BYTES = 100 * 1024; // 100 KB for non-webhook JSON
 const MAX_WEBHOOK_BODY_BYTES = 256 * 1024; // 256 KB raw webhook payloads
@@ -18,17 +22,21 @@ const MAX_WEBHOOK_BODY_BYTES = 256 * 1024; // 256 KB raw webhook payloads
 export interface CreateAppOptions {
   env: Env;
   emailService?: EmailService;
+  metrolinxService?: MetrolinxService;
   processedMessageIds?: Set<string>;
 }
 
 export function createApp(options: CreateAppOptions): Express {
   const app = express();
   const emailService = options.emailService ?? createEmailService(options.env);
+  const metrolinxService =
+    options.metrolinxService ?? createMetrolinxService(options.env);
   const processedMessageIds = options.processedMessageIds ?? new Set<string>();
 
   const inboundDeps: InboundEmailRouteDeps = {
     env: options.env,
     emailService,
+    metrolinxService,
     processedMessageIds,
   };
 

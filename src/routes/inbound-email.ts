@@ -1,15 +1,19 @@
 import type { Request, Response, NextFunction, RequestHandler } from 'express';
 import { Webhook } from 'svix';
 import type { Env } from '../config/env.js';
-import type { EmailService } from '../services/email-service.js';
+import type { EmailService, ScheduleReply } from '../services/email-service.js';
 import { parseFromHeader } from '../services/email-service.js';
+import type { MetrolinxService } from '../services/metrolinx-service.js';
+import type { ResolvedStop } from '../types/metrolinx.js';
 import { resendInboundWebhookSchema } from '../types/inbound-email.js';
 import { cleanEmailBody } from '../utils/clean-email-body.js';
 import { isAutomatedEmail } from '../utils/is-automated-email.js';
+import { parseCommuteRequest } from '../utils/parse-commute-request.js';
 
 export interface InboundEmailRouteDeps {
   env: Env;
   emailService: EmailService;
+  metrolinxService: MetrolinxService;
   /**
    * In-memory set of provider message IDs already processed.
    * WARNING: This must be replaced with persistent storage (e.g. Redis or a
@@ -17,6 +21,63 @@ export interface InboundEmailRouteDeps {
    * and multi-instance deployments will not share it.
    */
   processedMessageIds: Set<string>;
+}
+
+function stopNames(stops: ResolvedStop[]): string[] {
+  return stops.map((stop) => stop.name);
+}
+
+/**
+ * Turn a rider's cleaned message + subject into a ready-to-render reply by
+ * parsing the route and (when configured) querying the Metrolinx API.
+ */
+async function resolveScheduleReply(
+  deps: InboundEmailRouteDeps,
+  cleanedBody: string,
+  subject: string,
+): Promise<ScheduleReply> {
+  const parsed = parseCommuteRequest(cleanedBody, subject);
+
+  if (!deps.metrolinxService.isConfigured()) {
+    return { kind: 'unavailable', rawRequest: cleanedBody };
+  }
+
+  if (!parsed) {
+    return { kind: 'unrecognized', rawRequest: cleanedBody };
+  }
+
+  const result = await deps.metrolinxService.planJourney(parsed.from, parsed.to, {
+    startTime: parsed.startTime ?? undefined,
+  });
+
+  switch (result.status) {
+    case 'ok':
+      return {
+        kind: 'schedule',
+        from: result.from.name,
+        to: result.to.name,
+        date: result.date,
+        journeys: result.journeys,
+      };
+    case 'no_service':
+      return {
+        kind: 'no_service',
+        from: result.from.name,
+        to: result.to.name,
+        date: result.date,
+      };
+    case 'station_not_found':
+      return {
+        kind: 'station_not_found',
+        query: result.query,
+        suggestions: stopNames(result.suggestions),
+      };
+    case 'error':
+      console.error('Metrolinx journey lookup failed', {
+        reason: result.message,
+      });
+      return { kind: 'unavailable', rawRequest: cleanedBody };
+  }
 }
 
 function extractRawBody(req: Request): string {
@@ -159,6 +220,7 @@ async function handleInboundEmail(
   }
 
   const cleanedBody = cleanEmailBody(content.text ?? '');
+  const reply = await resolveScheduleReply(deps, cleanedBody, subject);
 
   // Mark as processed before sending to reduce duplicate-reply risk if the
   // provider retries while a send is in flight. If send fails, remove so a
@@ -170,7 +232,7 @@ async function handleInboundEmail(
       toEmail: fromEmail,
       toName: fromName,
       originalSubject: subject,
-      cleanedBody,
+      reply,
     });
   } catch (error) {
     deps.processedMessageIds.delete(providerMessageId);

@@ -4,6 +4,7 @@ import { Webhook } from 'svix';
 import { createApp } from '../src/app.js';
 import type { Env } from '../src/config/env.js';
 import type { EmailService } from '../src/services/email-service.js';
+import type { MetrolinxService } from '../src/services/metrolinx-service.js';
 import type { InboundEmailContent } from '../src/types/inbound-email.js';
 import { buildHtmlBody } from '../src/services/email-service.js';
 import { escapeHtml } from '../src/utils/escape-html.js';
@@ -18,7 +19,36 @@ const testEnv: Env = {
   SERVICE_EMAIL_ADDRESS: 'commute@example.com',
   SERVICE_FROM_EMAIL: 'commute@example.com',
   SERVICE_EMAIL_NAME: 'Commute Mail',
+  METROLINX_API_KEY: 'test_metrolinx_key',
+  METROLINX_API_BASE_URL: 'https://api.openmetrolinx.com/OpenDataAPI',
+  METROLINX_MAX_JOURNEYS: 4,
 };
+
+function createMockMetrolinxService(
+  overrides: Partial<MetrolinxService> = {},
+): MetrolinxService {
+  return {
+    isConfigured: vi.fn().mockReturnValue(true),
+    resolveStation: vi.fn(),
+    planJourney: vi.fn().mockResolvedValue({
+      status: 'ok',
+      from: { code: 'UN', name: 'Union Station' },
+      to: { code: 'UI', name: 'Unionville GO' },
+      date: '20260802',
+      journeys: [
+        {
+          startTime: '07:20',
+          endTime: '08:05',
+          duration: '45 min',
+          transferCount: 0,
+          accessible: true,
+          legs: [{ line: 'Stouffville', direction: 'NB', tripNumber: '123' }],
+        },
+      ],
+    }),
+    ...overrides,
+  };
+}
 
 function signWebhookPayload(payload: string): {
   id: string;
@@ -94,6 +124,7 @@ describe('GET /api/health', () => {
     const app = createApp({
       env: testEnv,
       emailService: createMockEmailService(),
+      metrolinxService: createMockMetrolinxService(),
     });
 
     const response = await request(app).get('/api/health');
@@ -104,15 +135,22 @@ describe('GET /api/health', () => {
 
 describe('POST /api/webhooks/inbound-email', () => {
   let emailService: ReturnType<typeof createMockEmailService>;
+  let metrolinxService: MetrolinxService;
   let processedMessageIds: Set<string>;
 
   beforeEach(() => {
     emailService = createMockEmailService();
+    metrolinxService = createMockMetrolinxService();
     processedMessageIds = new Set<string>();
   });
 
-  it('sends a reply for a normal inbound email', async () => {
-    const app = createApp({ env: testEnv, emailService, processedMessageIds });
+  it('replies with the GO schedule for a normal inbound email', async () => {
+    const app = createApp({
+      env: testEnv,
+      emailService,
+      metrolinxService,
+      processedMessageIds,
+    });
     const payload = buildWebhookBody({ emailId: 'email_normal' });
 
     const response = await postSignedWebhook(app, payload);
@@ -120,39 +158,84 @@ describe('POST /api/webhooks/inbound-email', () => {
     expect(response.status).toBe(200);
     expect(response.body).toEqual({ status: 'ok' });
     expect(emailService.fetchInboundContent).toHaveBeenCalledWith('email_normal');
+    expect(metrolinxService.planJourney).toHaveBeenCalledWith(
+      'Union',
+      'Unionville',
+      expect.objectContaining({}),
+    );
     expect(emailService.sendConfirmation).toHaveBeenCalledTimes(1);
-    expect(emailService.sendConfirmation).toHaveBeenCalledWith({
-      toEmail: 'rider@example.com',
-      toName: null,
-      originalSubject: 'GO schedule',
-      cleanedBody: 'Union to Unionville',
-    });
+    expect(emailService.sendConfirmation).toHaveBeenCalledWith(
+      expect.objectContaining({
+        toEmail: 'rider@example.com',
+        toName: null,
+        originalSubject: 'GO schedule',
+        reply: expect.objectContaining({
+          kind: 'schedule',
+          from: 'Union Station',
+          to: 'Unionville GO',
+        }),
+      }),
+    );
   });
 
-  it('uses the empty-body fallback message', async () => {
+  it('replies "unrecognized" when no route can be parsed', async () => {
     emailService = createMockEmailService({
-      text: '   ',
+      text: 'hello there, how are you?',
       html: null,
       headers: {},
     });
-    const app = createApp({ env: testEnv, emailService, processedMessageIds });
-    const payload = buildWebhookBody({ emailId: 'email_empty' });
+    const app = createApp({
+      env: testEnv,
+      emailService,
+      metrolinxService,
+      processedMessageIds,
+    });
+    const payload = buildWebhookBody({ emailId: 'email_unparseable', subject: 'hi' });
 
     const response = await postSignedWebhook(app, payload);
 
     expect(response.status).toBe(200);
+    expect(metrolinxService.planJourney).not.toHaveBeenCalled();
     expect(emailService.sendConfirmation).toHaveBeenCalledWith(
       expect.objectContaining({
-        cleanedBody: '',
+        reply: expect.objectContaining({ kind: 'unrecognized' }),
+      }),
+    );
+  });
+
+  it('replies "unavailable" when Metrolinx is not configured', async () => {
+    metrolinxService = createMockMetrolinxService({
+      isConfigured: vi.fn().mockReturnValue(false),
+    });
+    const app = createApp({
+      env: testEnv,
+      emailService,
+      metrolinxService,
+      processedMessageIds,
+    });
+    const payload = buildWebhookBody({ emailId: 'email_unconfigured' });
+
+    const response = await postSignedWebhook(app, payload);
+
+    expect(response.status).toBe(200);
+    expect(metrolinxService.planJourney).not.toHaveBeenCalled();
+    expect(emailService.sendConfirmation).toHaveBeenCalledWith(
+      expect.objectContaining({
+        reply: expect.objectContaining({ kind: 'unavailable' }),
       }),
     );
 
-    const html = buildHtmlBody('');
+    const html = buildHtmlBody({ kind: 'unavailable', rawRequest: '' });
     expect(html).toContain(escapeHtml('No commute request was included.'));
   });
 
   it('does not send two replies for duplicate webhook deliveries', async () => {
-    const app = createApp({ env: testEnv, emailService, processedMessageIds });
+    const app = createApp({
+      env: testEnv,
+      emailService,
+      metrolinxService,
+      processedMessageIds,
+    });
     const payload = buildWebhookBody({ emailId: 'email_dup' });
 
     const first = await postSignedWebhook(app, payload);
@@ -166,7 +249,12 @@ describe('POST /api/webhooks/inbound-email', () => {
   });
 
   it('ignores emails from the service address', async () => {
-    const app = createApp({ env: testEnv, emailService, processedMessageIds });
+    const app = createApp({
+      env: testEnv,
+      emailService,
+      metrolinxService,
+      processedMessageIds,
+    });
     const payload = buildWebhookBody({
       emailId: 'email_self',
       from: 'commute@example.com',
@@ -188,7 +276,12 @@ describe('POST /api/webhooks/inbound-email', () => {
       html: null,
       headers: { 'Auto-Submitted': 'auto-replied' },
     });
-    const app = createApp({ env: testEnv, emailService, processedMessageIds });
+    const app = createApp({
+      env: testEnv,
+      emailService,
+      metrolinxService,
+      processedMessageIds,
+    });
     const payload = buildWebhookBody({
       emailId: 'email_ooo',
       subject: 'Out of Office',
@@ -203,13 +296,18 @@ describe('POST /api/webhooks/inbound-email', () => {
 
   it('escapes HTML in the incoming body for the HTML reply', () => {
     const cleaned = '<script>alert("xss")</script>';
-    const html = buildHtmlBody(cleaned);
+    const html = buildHtmlBody({ kind: 'unavailable', rawRequest: cleaned });
     expect(html).not.toContain('<script>');
     expect(html).toContain(escapeHtml(cleaned));
   });
 
   it('rejects invalid webhook signatures', async () => {
-    const app = createApp({ env: testEnv, emailService, processedMessageIds });
+    const app = createApp({
+      env: testEnv,
+      emailService,
+      metrolinxService,
+      processedMessageIds,
+    });
     const payload = buildWebhookBody({ emailId: 'email_bad_sig' });
 
     const response = await postSignedWebhook(app, payload, {

@@ -1,20 +1,28 @@
 # Commute Mail (Email Prototype)
 
-Minimal Node.js + TypeScript service that receives an inbound email via a Resend webhook and sends an automatic confirmation reply to the sender.
+Minimal Node.js + TypeScript service that receives an inbound email via a Resend webhook, looks up the next GO Transit departures on the Metrolinx Open Data API, and replies with the schedule.
 
-**This version only confirms that an email was received. It does not look up transit schedules, connect to Metrolinx, or parse commute requests.**
+**Email a route like `Union to Oakville` and you get back the next few GO departures.** If no Metrolinx API key is configured, it falls back to a "received your request" acknowledgement.
 
-Status: end-to-end local test succeeded — inbound email via Resend webhook → confirmation reply out. Omg it worked.
+## How it works
+
+1. A rider emails your receiving address with a route in the subject or body, e.g. `Union to Oakville` (optionally with a time: `Union to Oakville at 5:30pm`).
+2. Resend fires an `email.received` webhook; the app verifies it and fetches the plain-text body.
+3. The body/subject is parsed into an origin, destination, and optional time.
+4. Station names are resolved to Metrolinx stop codes (via `Stop/All`, cached 24h) and the `Schedule/Journey` endpoint is queried.
+5. The rider gets a reply listing the next departures (start → arrival, line, transfers, duration).
 
 ## Features
 
 - `POST /api/webhooks/inbound-email` — Resend inbound webhook
 - `GET /api/health` — health check
+- Metrolinx GO Transit schedule lookup (station name → stop code resolution + journey planning)
+- Forgiving free-text route parser (`X to Y`, `from X to Y`, `X -> Y`, with optional times)
 - Webhook signature verification (Svix / Resend)
 - Zod validation for environment variables and webhook payloads
 - In-memory duplicate delivery protection
 - Guards against self-replies and basic automated email loops
-- Plain-text + HTML confirmation emails (HTML-escaped user content)
+- Plain-text + HTML replies (HTML-escaped user content)
 
 ## Project structure
 
@@ -29,15 +37,19 @@ src/
     inbound-email.ts
   services/
     email-service.ts
+    metrolinx-service.ts
   utils/
     clean-email-body.ts
     escape-html.ts
     is-automated-email.ts
+    parse-commute-request.ts
   types/
     inbound-email.ts
+    metrolinx.ts
 tests/
   clean-email-body.test.ts
   inbound-email.test.ts
+  parse-commute-request.test.ts
 .env.example
 package.json
 tsconfig.json
@@ -66,7 +78,11 @@ cp .env.example .env
 | `RESEND_API_KEY` | Yes | Resend API key used to send mail and fetch received email content |
 | `RESEND_WEBHOOK_SECRET` | Yes | Signing secret from the Resend webhook (`whsec_...`) |
 | `SERVICE_EMAIL_ADDRESS` | Yes | From address for replies (must be a verified Resend sender/domain) |
+| `SERVICE_FROM_EMAIL` | No | Separate outbound From address (defaults to `SERVICE_EMAIL_ADDRESS`) |
 | `SERVICE_EMAIL_NAME` | No (default `Commute Mail`) | Display name used in the From header |
+| `METROLINX_API_KEY` | No | Metrolinx Open Data (GO Transit) API key. Without it, replies say schedule lookup is not configured |
+| `METROLINX_API_BASE_URL` | No (default `https://api.openmetrolinx.com/OpenDataAPI`) | Metrolinx API base URL |
+| `METROLINX_MAX_JOURNEYS` | No (default `4`) | Max number of journeys returned per reply (1–10) |
 
 Example `.env`:
 
@@ -76,7 +92,14 @@ RESEND_API_KEY=re_xxxxxxxxx
 RESEND_WEBHOOK_SECRET=whsec_xxxxxxxxx
 SERVICE_EMAIL_ADDRESS=commute@yourdomain.com
 SERVICE_EMAIL_NAME=Commute Mail
+METROLINX_API_KEY=xxxxxxxxxxxxxxxx
+METROLINX_API_BASE_URL=https://api.openmetrolinx.com/OpenDataAPI
+METROLINX_MAX_JOURNEYS=4
 ```
+
+### Getting a Metrolinx API key
+
+Register (free) at [the Metrolinx Open Data registration form](https://api.openmetrolinx.com/OpenDataAPI/Help/Registration/en). Approval is manual and can take up to 10 business days. Until a key is set, the app still runs and replies, but tells the rider that schedule lookup is not configured.
 
 The app validates these variables with Zod on startup and exits if any required value is missing or invalid.
 
@@ -177,25 +200,26 @@ Send mail to your Resend receiving address:
 ```text
 To: commute@yourdomain.com
 Subject: GO schedule
-Body: Union to Unionville
+Body: Union to Oakville
 ```
 
-You should receive a reply similar to:
+With a Metrolinx API key configured, you should receive a reply similar to:
 
 ```text
-Subject: Re: GO schedule
+Subject: Re: GO schedule: Union Station → Oakville GO
 
 Hi,
 
-We received your commute request:
+Next GO departures from Union Station to Oakville GO on Sunday, Aug 2:
 
-Union to Unionville
-
-Transit schedule lookup is not available yet, but the email system is working.
+1. 07:20 → 08:05  (Lakeshore West, direct, 45 min, accessible)
+2. 07:50 → 08:35  (Lakeshore West, direct, 45 min, accessible)
 
 Thanks,
 Commute Mail
 ```
+
+Without a Metrolinx API key, the reply instead acknowledges the request and notes that schedule lookup is not configured.
 
 ## 10. Deploying the server
 
